@@ -1,0 +1,12 @@
+.openapi-generator-ignore
+apis/DefaultApi.ts
+apis/index.ts
+index.ts
+models/ListVersions200Response.ts
+models/ListVersions200ResponseModulesInner.ts
+models/ListVersions200ResponseModulesInnerVersionsInner.ts
+models/SearchModules200Response.ts
+models/SearchModules200ResponseModulesInner.ts
+models/TerraformDiscovery200Response.ts
+models/index.ts
+runtime.ts
