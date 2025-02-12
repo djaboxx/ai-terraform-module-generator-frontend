@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+
+{% block title %}Profile{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row">
+        <div class="col-md-8 mx-auto">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title mb-0">Profile Settings</h3>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('profile') }}">
+                        {{ form.hidden_tag() }}
+                        <div class="mb-3">
+                            {{ form.email.label(class="form-label") }}
+                            {{ form.email(class="form-control") }}
+                            {% for error in form.email.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                            {% endfor %}
+                        </div>
+                        <div class="mb-3">
+                            {{ form.current_password.label(class="form-label") }}
+                            {{ form.current_password(class="form-control") }}
+                            {% for error in form.current_password.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                            {% endfor %}
+                        </div>
+                        <div class="mb-3">
+                            {{ form.new_password.label(class="form-label") }}
+                            {{ form.new_password(class="form-control") }}
+                            {% for error in form.new_password.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                            {% endfor %}
+                        </div>
+                        <div class="mb-3">
+                            {{ form.confirm_password.label(class="form-label") }}
+                            {{ form.confirm_password(class="form-control") }}
+                            {% for error in form.confirm_password.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                            {% endfor %}
+                        </div>
+                        <div class="d-grid">
+                            {{ form.submit(class="btn btn-primary") }}
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3 class="card-title mb-0">Namespace Memberships</h3>
+                </div>
+                <div class="card-body">
+                    {% if current_user.namespaces %}
+                        <ul class="list-group">
+                        {% for namespace in current_user.namespaces %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                {{ namespace }}
+                                <span class="badge bg-primary rounded-pill">Member</span>
+                            </li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p class="text-muted">You are not a member of any namespaces.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3 class="card-title mb-0">API Token</h3>
+                </div>
+                <div class="card-body">
+                    {% if current_user.token %}
+                        <div class="mb-3">
+                            <label class="form-label">Your API Token</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="apiToken" value="{{ current_user.token }}" readonly>
+                                <button class="btn btn-outline-secondary" type="button" onclick="toggleTokenVisibility()">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary" type="button" onclick="copyToken()">
+                                    <i class="bi bi-clipboard"></i>
+                                </button>
+                            </div>
+                        </div>
+                    {% else %}
+                        <p class="text-muted">No API token generated yet.</p>
+                    {% endif %}
+                    <form method="POST" action="{{ url_for('generate_token') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-primary">
+                            {% if current_user.token %}Regenerate Token{% else %}Generate Token{% endif %}
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleTokenVisibility() {
+    const tokenInput = document.getElementById('apiToken');
+    if (tokenInput.type === 'password') {
+        tokenInput.type = 'text';
+    } else {
+        tokenInput.type = 'password';
+    }
+}
+
+function copyToken() {
+    const tokenInput = document.getElementById('apiToken');
+    tokenInput.type = 'text';
+    tokenInput.select();
+    document.execCommand('copy');
+    tokenInput.type = 'password';
+    
+    // Show feedback
+    const tooltip = document.createElement('div');
+    tooltip.className = 'alert alert-success position-fixed bottom-0 end-0 m-3';
+    tooltip.innerHTML = 'Token copied to clipboard!';
+    document.body.appendChild(tooltip);
+    
+    setTimeout(() => {
+        tooltip.remove();
+    }, 2000);
+}
+</script>
+{% endblock %}

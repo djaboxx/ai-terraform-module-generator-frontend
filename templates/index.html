@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}Home{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Terraform Module Registry</h1>
+<p class="lead">Search and explore Terraform modules</p>
+
+<div class="search-container">
+    <div class="row g-3">
+        <div class="col-md-3">
+            <label for="namespaceFilter" class="form-label">Namespace</label>
+            <select id="namespaceFilter" class="form-select">
+                <option value="">All namespaces</option>
+                {% for namespace in namespaces %}
+                <option value="{{ namespace }}">{{ namespace }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label for="providerFilter" class="form-label">Provider</label>
+            <select id="providerFilter" class="form-select">
+                <option value="">All providers</option>
+                {% for provider in providers %}
+                <option value="{{ provider }}">{{ provider }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-6">
+            <label for="searchQuery" class="form-label">Search modules</label>
+            <input type="text" id="searchQuery" class="form-control" placeholder="Enter module name or description">
+        </div>
+    </div>
+</div>
+
+<div id="results"></div>
+
+<hr>
+<div class="mt-4">
+    <h3>How to use:</h3>
+    <ol>
+        <li>Select a namespace to filter by organization</li>
+        <li>Choose a provider to filter by cloud platform</li>
+        <li>Enter keywords to search for specific modules</li>
+        <li>Click "View Versions" to see available versions</li>
+    </ol>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    .module-card {
+        margin-bottom: 1rem;
+        border: none;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        transition: transform 0.2s ease-in-out;
+    }
+    .module-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    .form-select, .form-control {
+        border-radius: 4px;
+        border: 1px solid #dee2e6;
+        padding: 0.5rem;
+        transition: all 0.2s ease-in-out;
+    }
+    .form-select:focus, .form-control:focus {
+        border-color: #844FBA;
+        box-shadow: 0 0 0 0.2rem rgba(132, 79, 186, 0.25);
+    }
+    .form-label {
+        font-weight: 500;
+        color: #444;
+        margin-bottom: 0.5rem;
+    }
+    .search-container {
+        background-color: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+        margin-bottom: 2rem;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .module-title {
+        color: #844FBA;
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+    }
+    .module-info {
+        color: #666;
+        font-size: 0.9rem;
+    }
+    .module-description {
+        color: #444;
+        margin: 1rem 0;
+    }
+    .module-meta {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    .module-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: #666;
+    }
+    .versions-container {
+        background-color: #f8f9fa;
+        border-radius: 4px;
+        padding: 0.75rem;
+        margin-top: 1rem;
+    }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    function searchModules() {
+        const query = document.getElementById('searchQuery').value;
+        const provider = document.getElementById('providerFilter').value;
+        const namespace = document.getElementById('namespaceFilter').value;
+
+        fetch(`/api/search?query=${encodeURIComponent(query)}&provider=${encodeURIComponent(provider)}&namespace=${encodeURIComponent(namespace)}`)
+            .then(response => response.json())
+            .then(data => {
+                const resultsDiv = document.getElementById('results');
+                resultsDiv.innerHTML = '';
+
+                if (!data.modules || data.modules.length === 0) {
+                    resultsDiv.innerHTML = '<div class="alert alert-info">No modules found</div>';
+                    return;
+                }
+
+                data.modules.forEach(module => {
+                    const card = document.createElement('div');
+                    card.className = 'card module-card';
+                    card.innerHTML = `
+                        <div class="card-body">
+                            <div class="module-title">
+                                ${module.namespace}/${module.name}/${module.provider}
+                            </div>
+                            <div class="module-meta">
+                                <div class="module-meta-item">
+                                    <i class="bi bi-box"></i>
+                                    <span>${module.provider}</span>
+                                </div>
+                                <div class="module-meta-item">
+                                    <i class="bi bi-person"></i>
+                                    <span>${module.owner || 'Unknown'}</span>
+                                </div>
+                                <div class="module-meta-item">
+                                    <i class="bi bi-tag"></i>
+                                    <span>${module.version || 'No version'}</span>
+                                </div>
+                            </div>
+                            <p class="module-description">${module.description || 'No description available'}</p>
+                            <button class="btn btn-primary btn-sm" onclick="viewVersions('${module.namespace}', '${module.name}', '${module.provider}')">
+                                <i class="bi bi-clock-history"></i> View Versions
+                            </button>
+                            <div id="versions-${module.namespace}-${module.name}-${module.provider}" class="versions-container" style="display: none;"></div>
+                        </div>
+                    `;
+                    resultsDiv.appendChild(card);
+                });
+            })
+            .catch(error => {
+                document.getElementById('results').innerHTML = `
+                    <div class="alert alert-danger">Error: ${error.message}</div>
+                `;
+            });
+    }
+
+    function viewVersions(namespace, name, provider) {
+        const versionsDiv = document.getElementById(`versions-${namespace}-${name}-${provider}`);
+        
+        if (versionsDiv.style.display === 'none') {
+            versionsDiv.style.display = 'block';
+            fetch(`/api/modules/${namespace}/${name}/${provider}/versions`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.modules && data.modules[0].versions) {
+                        const versions = data.modules[0].versions.map(v => v.version);
+                        versionsDiv.innerHTML = `
+                            <div class="d-flex align-items-center gap-2">
+                                <i class="bi bi-clock-history text-muted"></i>
+                                <strong>Available Versions:</strong> 
+                                <span class="badge bg-light text-dark">${versions.join('</span> <span class="badge bg-light text-dark">')}</span>
+                            </div>
+                        `;
+                    } else {
+                        versionsDiv.innerHTML = `
+                            <div class="text-warning">
+                                <i class="bi bi-exclamation-triangle"></i> No versions available
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    versionsDiv.innerHTML = `
+                        <div class="text-danger">
+                            <i class="bi bi-exclamation-circle"></i> Error: ${error.message}
+                        </div>
+                    `;
+                });
+        } else {
+            versionsDiv.style.display = 'none';
+        }
+    }
+
+    // Add event listeners
+    document.getElementById('searchQuery').addEventListener('input', searchModules);
+    document.getElementById('providerFilter').addEventListener('change', searchModules);
+    document.getElementById('namespaceFilter').addEventListener('change', searchModules);
+
+    // Initial search on page load
+    searchModules();
+</script>
+{% endblock %}
