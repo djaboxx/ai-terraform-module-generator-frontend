@@ -4,7 +4,12 @@
 
 {% block content %}
 <h1 class="mb-4">Terraform Module Registry</h1>
-<p class="lead">Search and explore Terraform modules</p>
+<div class="d-flex align-items-center gap-3 mb-4">
+    <p class="lead mb-0">Search and explore Terraform modules</p>
+    <a href="https://github.com/darnold/ai-terraform-module-generator" class="btn btn-outline-primary" target="_blank">
+        <i class="bi bi-github"></i> View on GitHub
+    </a>
+</div>
 
 <div class="search-container">
     <div class="row g-3">
@@ -36,14 +41,14 @@
 <div id="results"></div>
 
 <hr>
+
 <div class="mt-4">
-    <h3>How to use:</h3>
-    <ol>
-        <li>Select a namespace to filter by organization</li>
-        <li>Choose a provider to filter by cloud platform</li>
-        <li>Enter keywords to search for specific modules</li>
-        <li>Click "View Versions" to see available versions</li>
-    </ol>
+    <h3>Navigation</h3>
+    <ul>
+        <li><a href="{{ url_for('login') }}">Login</a></li>
+        <li><a href="{{ url_for('register') }}">Register</a></li>
+        <li><a href="{{ url_for('register_repo') }}">Register Repository</a></li>
+    </ul>
 </div>
 {% endblock %}
 
@@ -112,6 +117,15 @@
         padding: 0.75rem;
         margin-top: 1rem;
     }
+    .btn-outline-primary {
+        color: #844FBA;
+        border-color: #844FBA;
+    }
+    .btn-outline-primary:hover {
+        background-color: #844FBA;
+        border-color: #844FBA;
+        color: white;
+    }
 </style>
 {% endblock %}
 
@@ -122,7 +136,7 @@
         const provider = document.getElementById('providerFilter').value;
         const namespace = document.getElementById('namespaceFilter').value;
 
-        fetch(`/api/search?query=${encodeURIComponent(query)}&provider=${encodeURIComponent(provider)}&namespace=${encodeURIComponent(namespace)}`)
+        fetch(`/v1/modules/search?query=${encodeURIComponent(query)}&provider=${encodeURIComponent(provider)}&namespace=${encodeURIComponent(namespace)}`)
             .then(response => response.json())
             .then(data => {
                 const resultsDiv = document.getElementById('results');
@@ -139,7 +153,7 @@
                     card.innerHTML = `
                         <div class="card-body">
                             <div class="module-title">
-                                ${module.namespace}/${module.name}/${module.provider}
+                                <a href="${module.source}" target="_blank">${module.namespace}/${module.name}/${module.provider}</a>
                             </div>
                             <div class="module-meta">
                                 <div class="module-meta-item">
@@ -154,11 +168,18 @@
                                     <i class="bi bi-tag"></i>
                                     <span>${module.version || 'No version'}</span>
                                 </div>
+                                <div class="module-meta-item">
+                                    <i class="bi bi-download"></i>
+                                    <span>${module.downloads || 0} downloads</span>
+                                </div>
+                                ${module.verified ? '<div class="module-meta-item"><i class="bi bi-check-circle-fill text-success"></i><span>Verified</span></div>' : ''}
                             </div>
                             <p class="module-description">${module.description || 'No description available'}</p>
-                            <button class="btn btn-primary btn-sm" onclick="viewVersions('${module.namespace}', '${module.name}', '${module.provider}')">
-                                <i class="bi bi-clock-history"></i> View Versions
-                            </button>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-primary btn-sm" onclick="viewVersions('${module.namespace}', '${module.name}', '${module.provider}')">
+                                    <i class="bi bi-clock-history"></i> View Versions
+                                </button>
+                            </div>
                             <div id="versions-${module.namespace}-${module.name}-${module.provider}" class="versions-container" style="display: none;"></div>
                         </div>
                     `;
@@ -172,23 +193,61 @@
             });
     }
 
+    function downloadModule(namespace, name, provider, version) {
+        fetch(`/v1/modules/${namespace}/${name}/${provider}/${version}/download`)
+            .then(response => {
+                if (response.status === 204) {
+                    const downloadUrl = response.headers.get('X-Terraform-Get');
+                    if (downloadUrl) {
+                        window.location.href = downloadUrl;
+                    } else {
+                        throw new Error('Download URL not found');
+                    }
+                } else {
+                    throw new Error('Failed to get download URL');
+                }
+            })
+            .catch(error => {
+                alert(`Error downloading module: ${error.message}`);
+            });
+    }
+
     function viewVersions(namespace, name, provider) {
         const versionsDiv = document.getElementById(`versions-${namespace}-${name}-${provider}`);
         
         if (versionsDiv.style.display === 'none') {
             versionsDiv.style.display = 'block';
-            fetch(`/api/modules/${namespace}/${name}/${provider}/versions`)
+            fetch(`/v1/modules/${namespace}/${name}/${provider}/versions`)
                 .then(response => response.json())
                 .then(data => {
-                    if (data.modules && data.modules[0].versions) {
-                        const versions = data.modules[0].versions.map(v => v.version);
-                        versionsDiv.innerHTML = `
-                            <div class="d-flex align-items-center gap-2">
-                                <i class="bi bi-clock-history text-muted"></i>
-                                <strong>Available Versions:</strong> 
-                                <span class="badge bg-light text-dark">${versions.join('</span> <span class="badge bg-light text-dark">')}</span>
-                            </div>
-                        `;
+                    if (data.modules && data.modules[0] && data.modules[0].versions) {
+                        const versions = data.modules[0].versions.map(v => v.version).filter(v => v);
+                        if (versions.length > 0) {
+                            versionsDiv.innerHTML = `
+                                <div class="d-flex align-items-center gap-2">
+                                    <i class="bi bi-clock-history text-muted"></i>
+                                    <strong>Available Versions:</strong> 
+                                    <div class="d-flex flex-wrap gap-2">
+                                        ${versions.map(version => `
+                                            <div>
+                                                <span class="badge bg-light text-dark">${version}</span>
+                                                ${isNamespaceAccessible(namespace) ? `
+                                                    <button class="btn btn-sm btn-link p-0 ms-1" onclick="downloadModule('${namespace}', '${name}', '${provider}', '${version}')">
+                                                        <i class="bi bi-download"></i>
+                                                    </button>
+                                                ` : ''}
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            `;
+                        } else {
+                            versionsDiv.innerHTML = `
+                                <div class="text-warning">
+                                    <i class="bi bi-exclamation-triangle"></i> No versions available
+                                </div>
+                            `;
+                        }
                     } else {
                         versionsDiv.innerHTML = `
                             <div class="text-warning">
@@ -207,6 +266,11 @@
         } else {
             versionsDiv.style.display = 'none';
         }
+    }
+
+    function isNamespaceAccessible(namespace) {
+        const accessibleNamespaces = JSON.parse('{{ namespaces|tojson|safe }}');
+        return accessibleNamespaces.includes(namespace);
     }
 
     // Add event listeners

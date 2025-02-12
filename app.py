@@ -1,41 +1,73 @@
-from flask import Flask, render_template, request, jsonify, flash, redirect, url_for
+from flask import Flask, render_template, request, jsonify, flash, redirect, url_for, current_app, Response
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, CSRFError
+from flask_migrate import Migrate
+from urllib.parse import urlparse
+from typing import Dict, Any, Optional
 import requests
-from typing import Optional, Dict, Any
-import json
+import re
 import os
-from models import db, User
-from forms import LoginForm, RegistrationForm, ProfileForm
-import click
+import logging
+from models import db, User, Repository
+from forms import LoginForm, RegistrationForm, ProfileForm, RepositoryForm
+from dotenv import load_dotenv
+from werkzeug.exceptions import HTTPException
+
+# Load environment variables
+load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-please-change')  # Change in production
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
+
+# Database Configuration
+DB_USER = os.environ.get('DB_USER', 'admin')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'adminpass')
+DB_HOST = os.environ.get('DB_HOST', 'localhost')
+DB_PORT = os.environ.get('DB_PORT', '5432')
+DB_NAME = os.environ.get('DB_NAME', 'moduledb')
+
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-please-change')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['WTF_CSRF_ENABLED'] = True
+app.config['WTF_CSRF_SECRET_KEY'] = app.config['SECRET_KEY']
+app.config['BACKEND_URL'] = os.environ.get('BACKEND_URL', 'http://localhost:8000')
 
 # Initialize extensions
 db.init_app(app)
+migrate = Migrate(app, db)
 csrf = CSRFProtect(app)
-login_manager = LoginManager()
-login_manager.init_app(app)
+login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-# CLI commands
-@app.cli.command("init-db")
-def init_db():
-    """Initialize the database."""
-    click.echo('Creating database tables...')
-    db.create_all()
-    click.echo('Database tables created successfully!')
-
-# Create the database tables within an application context
+# Create database tables
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Error creating database tables: {e}")
+
+# Default values
+DEFAULT_NAMESPACES = ["hashicorp", "terraform-aws-modules", "terraform-google-modules"]
+DEFAULT_PROVIDERS = ["aws", "azure", "gcp", "kubernetes"]
 
 class TerraformModuleClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url.rstrip('/')
+        self.token = None
+
+    def set_jwt_token(self, token: str):
+        self.token = token
+
+    def get_headers(self) -> Dict[str, str]:
+        headers = {'Content-Type': 'application/json'}
+        if self.token:
+            headers['Authorization'] = f'Bearer {self.token}'
+        return headers
 
     def search_modules(
         self,
@@ -43,40 +75,155 @@ class TerraformModuleClient:
         provider: Optional[str] = None,
         namespace: Optional[str] = None,
         limit: int = 10,
-        offset: int = 0,
-        headers: Optional[Dict[str, str]] = None
+        offset: int = 0
     ) -> Dict[str, Any]:
-        params = {k: v for k, v in locals().items() if v is not None and k not in ['self', 'headers']}
-        response = requests.get(f"{self.base_url}/v1/modules/search", params=params, headers=headers)
-        response.raise_for_status()
-        return response.json()
-
-    def get_module_versions(self, namespace: str, name: str, provider: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        params = {
+            'query': query,
+            'limit': limit,
+            'offset': offset
+        }
+        if provider:
+            params['provider'] = provider
+        if namespace:
+            params['namespace'] = namespace
+            
         response = requests.get(
-            f"{self.base_url}/v1/modules/{namespace}/{name}/{provider}/versions",
-            headers=headers
+            f"{self.base_url}/v1/modules/search",
+            params=params,
+            headers=self.get_headers()
         )
         response.raise_for_status()
         return response.json()
 
-    def get_module_details(self, namespace: str, name: str, provider: str, version: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def get_module_versions(self, namespace: str, name: str, provider: str) -> Dict[str, Any]:
+        response = requests.get(
+            f"{self.base_url}/v1/modules/{namespace}/{name}/{provider}/versions",
+            headers=self.get_headers()
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_module_details(self, namespace: str, name: str, provider: str, version: str) -> Dict[str, Any]:
         response = requests.get(
             f"{self.base_url}/v1/modules/{namespace}/{name}/{provider}/{version}",
-            headers=headers
+            headers=self.get_headers()
         )
         response.raise_for_status()
         return response.json()
 
 # Initialize the client
-client = TerraformModuleClient()
-
-# Default values in case the backend is not accessible
-DEFAULT_NAMESPACES = ["hashicorp", "terraform-aws-modules", "terraform-google-modules"]
-DEFAULT_PROVIDERS = ["aws", "azure", "gcp", "kubernetes"]
+client = TerraformModuleClient(base_url=app.config['BACKEND_URL'])
 
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
+
+def refresh_token(current_user):
+    """Helper function to refresh an expired token"""
+    try:
+        if not current_user.token:
+            return False
+            
+        response = requests.post(
+            f"{app.config['BACKEND_URL']}/auth/refresh",
+            headers={
+                'Authorization': f'Bearer {current_user.token}',
+                'Content-Type': 'application/json'
+            }
+        )
+        
+        if response.status_code == 401:  # Token completely invalid
+            return False
+            
+        response.raise_for_status()
+        token_data = response.json()
+        
+        if not token_data.get('token'):
+            return False
+            
+        current_user.token = token_data['token']
+        current_user.permissions = token_data.get('permissions', current_user.permissions)
+        db.session.commit()
+        client.set_jwt_token(current_user.token)
+        logger.info(f"Token refreshed for user {current_user.email}")
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Token refresh failed: {str(e)}")
+        return False
+
+@app.before_request
+def check_token():
+    """Check if token needs refresh before each request"""
+    if current_user.is_authenticated and request.endpoint != 'login':
+        try:
+            response = requests.get(
+                f"{app.config['BACKEND_URL']}/auth/verify",
+                headers={'Authorization': f'Bearer {current_user.token}'} if current_user.token else {}
+            )
+            if response.status_code == 401:  # Token expired
+                if not refresh_token(current_user):
+                    logout_user()
+                    flash('Your session has expired. Please log in again.', 'info')
+                    return redirect(url_for('login'))
+        except requests.exceptions.RequestException:
+            pass  # Don't fail on connection issues
+
+@app.route('/')
+@login_required
+def index():
+    try:
+        if not current_user.token:
+            logger.warning(f"No token found for user {current_user.email}")
+            return redirect(url_for('login'))
+
+        # Verify token is still valid
+        try:
+            response = requests.get(
+                f"{app.config['BACKEND_URL']}/auth/verify",
+                headers={'Authorization': f'Bearer {current_user.token}'}
+            )
+            if response.status_code == 401:
+                if not refresh_token(current_user):
+                    logger.warning(f"Token refresh failed for user {current_user.email}")
+                    logout_user()
+                    flash('Your session has expired. Please log in again.', 'info')
+                    return redirect(url_for('login'))
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Token verification failed: {str(e)}")
+            return redirect(url_for('login'))
+
+        # Set token in client
+        client.set_jwt_token(current_user.token)
+        
+        # Get all repositories in namespaces the user has access to
+        repositories = Repository.query.filter(
+            Repository.namespace.in_(current_user.namespaces or DEFAULT_NAMESPACES)
+        ).all()
+        
+        # Convert repositories to module format
+        registered_modules = [{
+            'namespace': repo.namespace,
+            'name': repo.name,
+            'provider': repo.provider,
+            'owner': repo.owner_id,  # Keep original owner information
+            'description': 'Module in accessible namespace',
+            'version': 'latest',
+            'repo_url': repo.url
+        } for repo in repositories]
+
+        return render_template('index.html', 
+                          namespaces=current_user.namespaces or DEFAULT_NAMESPACES,
+                          providers=DEFAULT_PROVIDERS,
+                          registered_modules=registered_modules)
+    except Exception as e:
+        logger.error(f"Error in index route: {str(e)}")
+        if 'token' in str(e).lower() or '403' in str(e):
+            return redirect(url_for('login'))
+        flash(f'Error accessing data: {str(e)}', 'danger')
+        return render_template('index.html', 
+                          namespaces=DEFAULT_NAMESPACES,
+                          providers=DEFAULT_PROVIDERS,
+                          registered_modules=[])
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -87,10 +234,57 @@ def login():
     if form.validate_on_submit():
         user = User.query.filter_by(email=form.email.data).first()
         if user and user.check_password(form.password.data):
-            login_user(user)
-            flash('Logged in successfully.', 'success')
-            next_page = request.args.get('next')
-            return redirect(next_page or url_for('index'))
+            try:
+                # Request token from backend with role-based permissions
+                response = requests.post(
+                    f"{app.config['BACKEND_URL']}/auth/token",
+                    json={
+                        "username": user.email,
+                        "password": form.password.data,
+                        "grant_type": "password",
+                        "scope": " ".join(user.permissions),
+                        "role": user.role
+                    },
+                    headers={'Content-Type': 'application/json'}
+                )
+                logger.debug(f"Token request status: {response.status_code}")
+                
+                if response.status_code == 403:
+                    logger.error(f"Authentication failed for user {user.email}")
+                    flash('Authentication failed. Please check your credentials.', 'danger')
+                    return render_template('login.html', form=form)
+                
+                response.raise_for_status()
+                token_data = response.json()
+                
+                if not token_data.get('token'):
+                    logger.error(f"No token in response: {token_data}")
+                    flash('Authentication failed: Invalid server response', 'danger')
+                    return render_template('login.html', form=form)
+                
+                # Store token and update client
+                user.token = token_data['token']
+                db.session.commit()
+                client.set_jwt_token(user.token)
+                
+                # Complete login
+                login_user(user)
+                logger.info(f"User {user.email} logged in successfully with role {user.role}")
+                
+                next_page = request.args.get('next')
+                if not next_page or urlparse(next_page).netloc != '':
+                    next_page = url_for('index')
+                return redirect(next_page)
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Backend authentication failed: {str(e)}")
+                flash('Authentication service unavailable. Please try again later.', 'danger')
+                return render_template('login.html', form=form)
+            except Exception as e:
+                logger.error(f"Unexpected error during login: {str(e)}")
+                flash('An unexpected error occurred. Please try again.', 'danger')
+                return render_template('login.html', form=form)
+        
         flash('Invalid email or password.', 'danger')
     return render_template('login.html', form=form)
 
@@ -105,10 +299,12 @@ def register():
             flash('Email already registered.', 'danger')
             return render_template('register.html', form=form)
         
-        user = User(email=form.email.data)
+        user = User(
+            email=form.email.data,
+            role=form.role.data
+        )
         user.set_password(form.password.data)
-        user.permissions = ['read:module']  # Default permission
-        user.namespaces = []  # Empty namespace list by default
+        user.namespaces = []
         
         db.session.add(user)
         db.session.commit()
@@ -117,134 +313,197 @@ def register():
         return redirect(url_for('login'))
     return render_template('register.html', form=form)
 
-@app.route('/logout')
+@app.route('/register_repo', methods=['GET', 'POST'])
 @login_required
-def logout():
-    logout_user()
-    flash('You have been logged out.', 'info')
-    return redirect(url_for('index'))
+def register_repo():
+    # Check if user has permission to register repositories
+    if 'upload:module' not in current_user.permissions:
+        flash('You do not have permission to register repositories. Please upgrade to Publisher role.', 'danger')
+        return redirect(url_for('index'))
 
-@app.route('/profile', methods=['GET', 'POST'])
-@login_required
-def profile():
-    form = ProfileForm()
+    form = RepositoryForm()
     if form.validate_on_submit():
-        if form.current_password.data and not current_user.check_password(form.current_password.data):
-            flash('Current password is incorrect.', 'danger')
-            return render_template('profile.html', form=form)
+        repo_url = form.repo_url.data.rstrip('.git')
         
-        if form.email.data != current_user.email:
-            if User.query.filter_by(email=form.email.data).first():
-                flash('Email already registered.', 'danger')
-                return render_template('profile.html', form=form)
-            current_user.email = form.email.data
+        # Extract namespace and name from GitHub URL
+        match = re.match(r'^https?://github\.com/([\w-]+)/([\w-]+)', repo_url)
+        if not match:
+            flash('Invalid GitHub repository URL format.', 'danger')
+            return render_template('register_repo.html', form=form)
+            
+        namespace = match.group(1)
+        name = match.group(2)
         
-        if form.new_password.data:
-            current_user.set_password(form.new_password.data)
+        # Check if user has permission for this namespace
+        if namespace not in (current_user.namespaces or DEFAULT_NAMESPACES):
+            flash(f'You do not have permission to register repositories in the {namespace} namespace.', 'danger')
+            return render_template('register_repo.html', form=form)
         
-        db.session.commit()
-        flash('Profile updated successfully.', 'success')
-        return redirect(url_for('profile'))
-    
-    elif request.method == 'GET':
-        form.email.data = current_user.email
-    
-    return render_template('profile.html', form=form)
-
-@app.route('/generate_token', methods=['POST'])
-@login_required
-def generate_token():
-    # Generate token using backend service
-    try:
-        # Make request to backend to generate token
-        response = requests.post(
-            f"{client.base_url}/auth/token",
-            json={
-                "user_id": current_user.id,
-                "email": current_user.email,
-                "permissions": current_user.permissions
-            }
+        # Check if repository already exists
+        existing_repo = Repository.query.filter_by(
+            namespace=namespace,
+            name=name
+        ).first()
+        
+        if existing_repo:
+            flash('This repository has already been registered.', 'warning')
+            return redirect(url_for('index'))
+        
+        # Create new repository
+        repo = Repository(
+            url=repo_url,
+            namespace=namespace,
+            name=name,
+            provider='github',
+            owner_id=current_user.id
         )
-        response.raise_for_status()
-        token_data = response.json()
         
-        # Update user's token
-        current_user.token = token_data.get('token')
-        db.session.commit()
-        
-        flash('API token generated successfully.', 'success')
-    except Exception as e:
-        flash(f'Error generating token: {str(e)}', 'danger')
+        try:
+            db.session.add(repo)
+            db.session.commit()
+            flash('Repository registered successfully.', 'success')
+            return redirect(url_for('index'))
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error registering repository: {str(e)}', 'danger')
+            return render_template('register_repo.html', form=form)
     
-    return redirect(url_for('profile'))
+    return render_template('register_repo.html', form=form)
 
-@app.route('/')
-def index():
-    if not current_user.is_authenticated:
-        return redirect(url_for('login'))
-    return render_template('index.html', 
-                         namespaces=current_user.namespaces or DEFAULT_NAMESPACES,
-                         providers=DEFAULT_PROVIDERS)
+@app.route('/api/repositories')
+@login_required
+def list_repositories():
+    try:
+        # Get all repositories in namespaces the user has access to
+        repositories = Repository.query.filter(
+            Repository.namespace.in_(current_user.namespaces or DEFAULT_NAMESPACES)
+        ).all()
+        
+        repos_list = [{
+            'id': repo.id,
+            'url': repo.url,
+            'namespace': repo.namespace,
+            'name': repo.name,
+            'provider': repo.provider,
+            'owner': repo.owner_id,
+            'created_at': repo.created_at.isoformat(),
+            'updated_at': repo.updated_at.isoformat(),
+            'can_edit': repo.owner_id == current_user.id  # Add flag for UI to show edit controls
+        } for repo in repositories]
+        return jsonify({'repositories': repos_list})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/api/search')
+@app.route('/v1/modules/search')
 @login_required
 def search_modules():
     try:
         query = request.args.get('query', '')
         provider = request.args.get('provider')
         namespace = request.args.get('namespace')
+        limit = request.args.get('limit', 10, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        # If namespace is specified, verify user has access to it
+        if namespace and namespace not in (current_user.namespaces or DEFAULT_NAMESPACES):
+            return jsonify({"error": "Namespace access denied"}), 403
         
-        # Add token to request if available
-        headers = {}
-        if current_user.token:
-            headers['Authorization'] = f'Bearer {current_user.token}'
-        
-        results = client.search_modules(
+        result = client.search_modules(
             query=query,
-            provider=provider if provider else None,
-            namespace=namespace if namespace else None,
-            headers=headers
+            provider=provider,
+            namespace=namespace,
+            limit=limit,
+            offset=offset
         )
-        return jsonify(results)
-    except requests.exceptions.RequestException as e:
+        
+        # Filter results to only show modules from accessible namespaces
+        if 'modules' in result:
+            accessible_namespaces = current_user.namespaces or DEFAULT_NAMESPACES
+            result['modules'] = [
+                module for module in result['modules']
+                if module.get('namespace') in accessible_namespaces
+            ]
+            
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error searching modules: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/modules/<namespace>/<name>/<provider>/versions')
+@app.route('/v1/modules/<namespace>/<name>/<provider>/versions')
 @login_required
-def get_versions(namespace, name, provider):
+def list_versions(namespace, name, provider):
     try:
-        headers = {}
-        if current_user.token:
-            headers['Authorization'] = f'Bearer {current_user.token}'
+        # Verify user has access to this namespace
+        if namespace not in (current_user.namespaces or DEFAULT_NAMESPACES):
+            return jsonify({"error": "Namespace access denied"}), 403
             
-        versions = client.get_module_versions(
-            namespace=namespace,
-            name=name,
-            provider=provider,
-            headers=headers
-        )
-        return jsonify(versions)
-    except requests.exceptions.RequestException as e:
+        result = client.list_versions(namespace, name, provider)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error listing versions: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/modules/<namespace>/<name>/<provider>/<version>')
+@app.route('/v1/modules/<namespace>/<name>/<provider>/<version>/download')
 @login_required
-def get_module_details(namespace, name, provider, version):
+def download_module(namespace, name, provider, version):
     try:
-        headers = {}
-        if current_user.token:
-            headers['Authorization'] = f'Bearer {current_user.token}'
+        # Verify user has access to this namespace
+        if namespace not in (current_user.namespaces or DEFAULT_NAMESPACES):
+            return jsonify({"error": "Namespace access denied"}), 403
             
-        details = client.get_module_details(
-            namespace=namespace,
-            name=name,
-            provider=provider,
-            version=version,
-            headers=headers
-        )
-        return jsonify(details)
-    except requests.exceptions.RequestException as e:
+        result = client.get_download_url(namespace, name, provider, version)
+        response = Response('', 204)
+        if result and 'download_url' in result:
+            response.headers['X-Terraform-Get'] = result['download_url']
+        return response
+    except Exception as e:
+        logger.error(f"Error getting download URL: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/v1/modules/<namespace>/<name>/<provider>/<version>/source')
+@login_required
+def get_module_source(namespace, name, provider, version):
+    try:
+        # Verify user has access to this namespace
+        if namespace not in (current_user.namespaces or DEFAULT_NAMESPACES):
+            return jsonify({"error": "Namespace access denied"}), 403
+            
+        result = client.get_module_source(namespace, name, provider, version)
+        response = Response('', 204)
+        if result and 'download_url' in result:
+            response.headers['X-Terraform-Get'] = result['download_url']
+        return response
+    except Exception as e:
+        logger.error(f"Error getting module source: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    flash('The form session has expired. Please try again.', 'danger')
+    return redirect(url_for('register_repo'))
+
+@app.errorhandler(HTTPException)
+def handle_http_error(error):
+    """Handle HTTP errors according to OpenAPI spec"""
+    response = jsonify({
+        "error": error.description,
+        "status_code": error.code
+    })
+    response.status_code = error.code
+    return response
+
+@app.errorhandler(Exception)
+def handle_generic_error(error):
+    """Handle unexpected errors according to OpenAPI spec"""
+    logger.error(f"Unexpected error: {str(error)}")
+    response = jsonify({
+        "error": "Internal server error",
+        "status_code": 500
+    })
+    response.status_code = 500
+    return response
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}Register Repository{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+    <h2 class="text-center mb-4">Register Repository</h2>
+    <form method="POST">
+        {{ form.csrf_token }}
+        <div class="mb-3">
+            {{ form.repo_url.label(class="form-label") }}
+            {{ form.repo_url(class="form-control", placeholder="Enter GitHub repository URL") }}
+            {% for error in form.repo_url.errors %}
+            <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+        <div class="d-grid">
+            <button type="submit" class="btn btn-primary">Register</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
