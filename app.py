@@ -2,54 +2,81 @@ from flask import Flask, render_template, request, jsonify, flash, redirect, url
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect, CSRFError
 from flask_migrate import Migrate
+from flask_cors import CORS
 from urllib.parse import urlparse
 from typing import Dict, Any, Optional
 import requests
 import re
 import os
 import logging
+import sys
 from models import db, User, Repository
-from forms import LoginForm, RegistrationForm, ProfileForm, RepositoryForm
+from forms import LoginForm, RegistrationForm, ProfileForm, RepositoryForm, AdminUserForm
 from dotenv import load_dotenv
 from werkzeug.exceptions import HTTPException
 
-# Load environment variables
-load_dotenv()
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging to stdout
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
+# Load environment variables first
+load_dotenv()
+logger.info("Environment variables loaded")
+
 app = Flask(__name__)
+CORS(app)  # Enable CORS
+logger.info("Flask app created with CORS enabled")
 
-# Database Configuration
-DB_USER = os.environ.get('DB_USER', 'admin')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', 'adminpass')
-DB_HOST = os.environ.get('DB_HOST', 'localhost')
-DB_PORT = os.environ.get('DB_PORT', '5432')
-DB_NAME = os.environ.get('DB_NAME', 'moduledb')
+# Database Configuration with error handling
+try:
+    # Build PostgreSQL URL from environment variables
+    db_url = f"postgresql://{os.environ.get('DB_USER', 'admin')}:{os.environ.get('DB_PASSWORD', 'adminpass')}@{os.environ.get('DB_HOST', 'postgres')}:{os.environ.get('DB_PORT', '5432')}/{os.environ.get('DB_NAME', 'moduledb')}"
+    
+    app.config.update(
+        SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-key-please-change'),
+        SQLALCHEMY_DATABASE_URI=db_url,
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        WTF_CSRF_ENABLED=True,
+        WTF_CSRF_SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-key-please-change'),
+        BACKEND_URL=os.environ.get('BACKEND_URL', 'http://localhost:8000')  # Changed default to 8000
+    )
+    logger.info(f"App configuration loaded with backend URL: {app.config['BACKEND_URL']}")
+except Exception as e:
+    logger.error(f"Error configuring application: {e}")
+    sys.exit(1)
 
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-please-change')
-app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['WTF_CSRF_ENABLED'] = True
-app.config['WTF_CSRF_SECRET_KEY'] = app.config['SECRET_KEY']
-app.config['BACKEND_URL'] = os.environ.get('BACKEND_URL', 'http://localhost:8000')
+# Initialize extensions with error handling
+try:
+    db.init_app(app)
+    logger.info("Database initialized")
+    
+    migrate = Migrate(app, db)
+    logger.info("Migration system initialized")
+    
+    csrf = CSRFProtect(app)
+    logger.info("CSRF protection initialized")
+    
+    login_manager = LoginManager(app)
+    login_manager.login_view = 'login'
+    logger.info("Login manager initialized")
+except Exception as e:
+    logger.error(f"Error initializing extensions: {e}")
+    sys.exit(1)
 
-# Initialize extensions
-db.init_app(app)
-migrate = Migrate(app, db)
-csrf = CSRFProtect(app)
-login_manager = LoginManager(app)
-login_manager.login_view = 'login'
-
-# Create database tables
-with app.app_context():
+# Attempt database connection and table creation
+def init_db():
     try:
-        db.create_all()
-        logger.info("Database tables created successfully")
+        with app.app_context():
+            db.create_all()
+            logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Error creating database tables: {e}")
+        return False
+    return True
 
 # Default values
 DEFAULT_NAMESPACES = ["hashicorp", "terraform-aws-modules", "terraform-google-modules"]
@@ -169,61 +196,11 @@ def check_token():
             pass  # Don't fail on connection issues
 
 @app.route('/')
-@login_required
-def index():
-    try:
-        if not current_user.token:
-            logger.warning(f"No token found for user {current_user.email}")
-            return redirect(url_for('login'))
-
-        # Verify token is still valid
-        try:
-            response = requests.get(
-                f"{app.config['BACKEND_URL']}/auth/verify",
-                headers={'Authorization': f'Bearer {current_user.token}'}
-            )
-            if response.status_code == 401:
-                if not refresh_token(current_user):
-                    logger.warning(f"Token refresh failed for user {current_user.email}")
-                    logout_user()
-                    flash('Your session has expired. Please log in again.', 'info')
-                    return redirect(url_for('login'))
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Token verification failed: {str(e)}")
-            return redirect(url_for('login'))
-
-        # Set token in client
-        client.set_jwt_token(current_user.token)
-        
-        # Get all repositories in namespaces the user has access to
-        repositories = Repository.query.filter(
-            Repository.namespace.in_(current_user.namespaces or DEFAULT_NAMESPACES)
-        ).all()
-        
-        # Convert repositories to module format
-        registered_modules = [{
-            'namespace': repo.namespace,
-            'name': repo.name,
-            'provider': repo.provider,
-            'owner': repo.owner_id,  # Keep original owner information
-            'description': 'Module in accessible namespace',
-            'version': 'latest',
-            'repo_url': repo.url
-        } for repo in repositories]
-
-        return render_template('index.html', 
-                          namespaces=current_user.namespaces or DEFAULT_NAMESPACES,
-                          providers=DEFAULT_PROVIDERS,
-                          registered_modules=registered_modules)
-    except Exception as e:
-        logger.error(f"Error in index route: {str(e)}")
-        if 'token' in str(e).lower() or '403' in str(e):
-            return redirect(url_for('login'))
-        flash(f'Error accessing data: {str(e)}', 'danger')
-        return render_template('index.html', 
-                          namespaces=DEFAULT_NAMESPACES,
-                          providers=DEFAULT_PROVIDERS,
-                          registered_modules=[])
+def home():
+    """Public homepage that redirects to login if not authenticated"""
+    if not current_user.is_authenticated:
+        return redirect(url_for('login'))
+    return redirect(url_for('index'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -262,6 +239,11 @@ def login():
                     flash('Authentication failed: Invalid server response', 'danger')
                     return render_template('login.html', form=form)
                 
+                # Update permissions from token response if they changed
+                if 'permissions' in token_data:
+                    user.permissions = token_data['permissions']
+                    logger.info(f"Updated permissions for user {user.email}: {user.permissions}")
+                
                 # Store token and update client
                 user.token = token_data['token']
                 db.session.commit()
@@ -298,10 +280,24 @@ def register():
         if User.query.filter_by(email=form.email.data).first():
             flash('Email already registered.', 'danger')
             return render_template('register.html', form=form)
+
+        # Check if this is the first user (admin)
+        is_first_user = User.query.count() == 0
+        admin_email = os.environ.get('ADMIN_EMAIL')
+        
+        if is_first_user and form.email.data == admin_email:
+            # First user with matching admin email gets admin role
+            role = 'admin'
+            permissions = ['read:module', 'write:module', 'upload:module', 'admin:users']
+        else:
+            # All other users get basic user role with read permission only
+            role = 'user'
+            permissions = ['read:module']
         
         user = User(
             email=form.email.data,
-            role=form.role.data
+            role=role,
+            permissions=permissions
         )
         user.set_password(form.password.data)
         user.namespaces = []
@@ -476,6 +472,44 @@ def get_module_source(namespace, name, provider, version):
     except Exception as e:
         logger.error(f"Error getting module source: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/users')
+@login_required
+def admin_users():
+    # Check if user is admin
+    if current_user.role != 'admin':
+        flash('Access denied. Admin privileges required.', 'danger')
+        return redirect(url_for('index'))
+        
+    users = User.query.all()
+    return render_template('admin/users.html', users=users)
+
+@app.route('/admin/users/<int:user_id>', methods=['GET', 'POST'])
+@login_required
+def admin_edit_user(user_id):
+    # Check if user is admin
+    if current_user.role != 'admin':
+        flash('Access denied. Admin privileges required.', 'danger')
+        return redirect(url_for('index'))
+        
+    user = User.query.get_or_404(user_id)
+    form = AdminUserForm()
+    
+    if form.validate_on_submit():
+        user.role = form.role.data
+        user.permissions = [p.strip() for p in form.permissions.data.split(',') if p.strip()]
+        user.namespaces = [n.strip() for n in form.namespaces.data.split(',') if n.strip()]
+        
+        db.session.commit()
+        flash(f'User {user.email} updated successfully.', 'success')
+        return redirect(url_for('admin_users'))
+        
+    elif request.method == 'GET':
+        form.role.data = user.role
+        form.permissions.data = ', '.join(user.permissions or [])
+        form.namespaces.data = ', '.join(user.namespaces or [])
+        
+    return render_template('admin/edit_user.html', form=form, user=user)
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}Edit User - {{ user.email }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1 class="mb-4">Edit User</h1>
+    <h4 class="text-muted mb-4">{{ user.email }}</h4>
+    
+    <form method="POST">
+        {{ form.hidden_tag() }}
+        
+        <div class="mb-3">
+            {{ form.role.label(class="form-label") }}
+            {{ form.role(class="form-control") }}
+            {% if form.role.errors %}
+                {% for error in form.role.errors %}
+                    <div class="text-danger">{{ error }}</div>
+                {% endfor %}
+            {% endif %}
+        </div>
+        
+        <div class="mb-3">
+            {{ form.permissions.label(class="form-label") }}
+            {{ form.permissions(class="form-control") }}
+            <small class="form-text text-muted">Comma-separated list of permissions (e.g., read:module, write:module, upload:module)</small>
+        </div>
+        
+        <div class="mb-3">
+            {{ form.namespaces.label(class="form-label") }}
+            {{ form.namespaces(class="form-control") }}
+            <small class="form-text text-muted">Comma-separated list of namespaces</small>
+        </div>
+        
+        <div class="mb-3">
+            <a href="{{ url_for('admin_users') }}" class="btn btn-secondary">Cancel</a>
+            {{ form.submit(class="btn btn-primary") }}
+        </div>
+    </form>
+</div>
+{% endblock %}

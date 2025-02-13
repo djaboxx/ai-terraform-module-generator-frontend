@@ -32,11 +32,12 @@ ROLE_PERMISSIONS = {
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128))
+    password_hash = db.Column(db.String(256))  # Increased length to accommodate scrypt hash
     token = db.Column(db.String(500))
     role = db.Column(db.String(20), default=Role.READER)
     repositories = db.relationship('Repository', backref='owner', lazy=True)
     namespaces = db.Column(db.JSON, default=list)
+    _permissions = db.Column('permissions', db.JSON, default=list)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -46,7 +47,13 @@ class User(UserMixin, db.Model):
 
     @property
     def permissions(self) -> List[str]:
-        return ROLE_PERMISSIONS.get(self.role, ROLE_PERMISSIONS[Role.READER])
+        if self._permissions is None:
+            self._permissions = ROLE_PERMISSIONS.get(self.role, ROLE_PERMISSIONS[Role.READER])
+        return self._permissions
+
+    @permissions.setter
+    def permissions(self, value):
+        self._permissions = value
 
     def to_dict(self):
         return {

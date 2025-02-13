@@ -10,8 +10,7 @@ class LoginForm(FlaskForm):
 class RegistrationForm(FlaskForm):
     email = StringField('Email', validators=[DataRequired(), Email()])
     password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
-    password2 = PasswordField('Repeat Password', validators=[DataRequired(), EqualTo('password')])
-    role = SelectField('Role', choices=[('reader', 'Reader'), ('publisher', 'Publisher')], default='reader')
+    password2 = PasswordField('Confirm Password', validators=[DataRequired(), EqualTo('password', message='Passwords must match')])
     submit = SubmitField('Register')
 
 class ProfileForm(FlaskForm):
@@ -31,3 +30,9 @@ class RepositoryForm(FlaskForm):
             message="Please enter a valid GitHub repository URL"
         )
     ])
+
+class AdminUserForm(FlaskForm):
+    role = StringField('Role', validators=[DataRequired()])
+    permissions = StringField('Permissions')  # Comma-separated list of permissions
+    namespaces = StringField('Namespaces')   # Comma-separated list of namespaces
+    submit = SubmitField('Update User')

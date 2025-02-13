@@ -45,9 +45,15 @@
 <div class="mt-4">
     <h3>Navigation</h3>
     <ul>
-        <li><a href="{{ url_for('login') }}">Login</a></li>
-        <li><a href="{{ url_for('register') }}">Register</a></li>
-        <li><a href="{{ url_for('register_repo') }}">Register Repository</a></li>
+        {% if current_user.is_authenticated %}
+            {% if current_user.role == 'admin' %}
+                <li><a href="{{ url_for('admin_users') }}">Manage Users</a></li>
+            {% endif %}
+            <li><a href="{{ url_for('register_repo') }}">Register Repository</a></li>
+        {% else %}
+            <li><a href="{{ url_for('login') }}">Login</a></li>
+            <li><a href="{{ url_for('register') }}">Register</a></li>
+        {% endif %}
     </ul>
 </div>
 {% endblock %}
